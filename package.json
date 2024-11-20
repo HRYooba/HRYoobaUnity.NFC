@@ -1,15 +1,14 @@
 {
   "name": "com.hryooba.nfc",
   "displayName": "HRYooba.NFC",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "unity": "2021.2",
-  "description": "Unity HRYooba\nNFC for Windows",
+  "description": "Unity HRYooba\nNFC",
   "author": {
     "name": "HRYooba"
   },
   "type": "library",
   "dependencies": {
-    "com.cysharp.r3": "1.1.2",
     "org.nuget.r3": "1.2.8"
   }
 }

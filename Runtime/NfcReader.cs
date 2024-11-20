@@ -1,330 +1,352 @@
 using System;
-using System.Text;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Collections.Generic;
+using PCSC;
+using PCSC.Monitoring;
+using PCSC.Iso7816;
+using NdefParser;
 using R3;
-using HRYooba.NFC.Internal;
-
-/*
-参考: https://www.softech.co.jp/mm_240605_tr.htm
-*/
 
 namespace HRYooba.NFC
 {
     public class NfcReader : IDisposable
     {
-        // device
-        private readonly int _deviceIndex = 0;
-        private string _readerName = "";
-        private IntPtr _hContext = IntPtr.Zero;
-        private IntPtr _hCard = IntPtr.Zero;
-        private IntPtr _activeProtocol = IntPtr.Zero;
-        private NfcApi.SCARD_READERSTATE[] _readerStates;
+        private readonly int _deviceIndex;
+        private ISCardContext _context;
+        private ISCardMonitor _monitor;
+        private SCRState _currentState = SCRState.Empty;
+        private string _currentCardIDm = string.Empty;
 
-        // logic
-        private bool _isCardPresent = false;
-
-        // thread
-        private readonly object _lock = new();
-        private readonly CancellationTokenSource cancellationTokenSource = new();
-
-        // event
-        private readonly Subject<Unit> _onCardDetectedSubject = new();
-        private readonly Subject<Unit> _onCardRemovedSubject = new();
-
-        // property
-        /// <summary>
-        /// Device Name
-        /// </summary>
-        public string ReaderName => _readerName;
+        private readonly Subject<string> _onCardDetectedSubject = new();
+        private readonly Subject<string> _onCardRemovedSubject = new();
 
         /// <summary>
-        /// カードがタッチされているか
+        /// Name of the reader.
         /// </summary>
-        public bool IsCardPresent
-        {
-            get
-            {
-                lock (_lock)
-                {
-                    return _isCardPresent;
-                }
-            }
-        }
+        public string ReaderName { get; private set; }
 
         /// <summary>
-        /// Detected Event
+        /// カードがタッチされているかどうか
         /// </summary>
-        public Observable<Unit> OnCardDetectedObservable => _onCardDetectedSubject.ObserveOnMainThread();
+        public bool IsCardPresent { get; private set; }
 
         /// <summary>
-        /// Removed Event
+        /// カードがタッチされたときのイベント
         /// </summary>
-        public Observable<Unit> OnCardRemovedObservable => _onCardRemovedSubject.ObserveOnMainThread();
+        public Observable<string> OnCardDetectedObservable => _onCardDetectedSubject;
+
+        /// <summary>
+        /// カードが離されたときのイベント
+        /// </summary>
+        public Observable<string> OnCardRemovedObservable => _onCardRemovedSubject;
 
         /// <summary>
         /// Constructor
         /// </summary>
         /// <param name="deviceIndex"></param>
-        /// <exception cref="Exception"></exception>
         public NfcReader(int deviceIndex = 0)
         {
             _deviceIndex = deviceIndex;
-
-            if (!EstablishContext())
-                throw new Exception("[NfcReader] Failed : Establishing Context");
-            if (!SelectReader())
-                throw new Exception("[NfcReader] Failed : Selecting Device");
-
-            Task.Run(() => RunAsync(cancellationTokenSource.Token));
         }
 
-        ~NfcReader()
-        {
-            Dispose();
-        }
-
+        /// <summary>
+        /// Dispose
+        /// </summary>
         public void Dispose()
         {
-            if (!ReleaseContext())
-                throw new Exception("[NfcReader] Failed : Releasing Context");
+            if (_context != null)
+            {
+                _context.Cancel();
+                _context.Dispose();
+            }
 
-            cancellationTokenSource.Cancel();
-            cancellationTokenSource.Dispose();
+            if (_monitor != null)
+            {
+                _monitor.StatusChanged -= OnStatusChanged;
+                _monitor.Cancel();
+                _monitor.Dispose();
+            }
 
             _onCardDetectedSubject.Dispose();
             _onCardRemovedSubject.Dispose();
         }
 
-        private async Task RunAsync(CancellationToken cancellationToken)
+        /// <summary>
+        /// Initialize
+        /// </summary>
+        public void Initialize()
         {
-            try
-            {
-                while (!cancellationToken.IsCancellationRequested)
-                {
-                    if (!GetReaderStatus())
-                        throw new Exception("[NfcReader] Failed : Waiting Status Change");
+            // Context
+            var contextFactory = ContextFactory.Instance;
+            _context = contextFactory.Establish(SCardScope.System);
 
-                    lock (_lock)
-                    {
-                        if ((_readerStates[_deviceIndex].dwEventState & NfcApi.SCARD_STATE_PRESENT) == NfcApi.SCARD_STATE_PRESENT)
-                        {
-                            if (!_isCardPresent)
-                            {
-                                _isCardPresent = true;
-                                _onCardDetectedSubject.OnNext(Unit.Default);
-                            }
-                        }
-                        else
-                        {
-                            if (_isCardPresent)
-                            {
-                                _isCardPresent = false;
-                                _onCardRemovedSubject.OnNext(Unit.Default);
-                            }
-                        }
-                    }
-
-                    await Task.Delay(100, cancellationToken);
-                }
-            }
-            catch (Exception e)
+            // ReaderName
+            var readerNames = _context.GetReaders();
+            if (readerNames.Length == 0)
             {
-                throw e;
+                throw new InvalidOperationException("[NfcReader] No readers found.");
             }
+            if (_deviceIndex >= readerNames.Length)
+            {
+                throw new ArgumentOutOfRangeException(nameof(_deviceIndex), _deviceIndex, $"[NfcReader] Device index must be less than {readerNames.Length}.");
+            }
+            ReaderName = readerNames[_deviceIndex];
+
+            // Reader Monitor
+            var monitorFactory = MonitorFactory.Instance;
+            _monitor = monitorFactory.Create(SCardScope.System);
+            _monitor.StatusChanged += OnStatusChanged;
+            _monitor.Start(ReaderName);
         }
 
         /// <summary>
-        /// IDm(UID)を読み取る
+        /// Read IDm(UID)
         /// </summary>
         /// <param name="cancellationToken"></param>
         /// <returns></returns>
         public async Task<string> ReadIDmAsync(CancellationToken cancellationToken)
         {
-            var (recvBuffer, recvLength) = await ReadAsync(APDUCommand.IDmCommand, 0, 255, 64, cancellationToken);
-            return BitConverter.ToString(recvBuffer, 0, recvLength - 2);
+            while (!IsCardPresent)
+            {
+                await Task.Delay(100, cancellationToken);
+            }
+
+            return _currentCardIDm;
         }
 
         /// <summary>
-        /// 指定したコマンドを送信し、受信したデータを返す
+        /// Read Binary data (NTAG 213 pageByte=4, pageCount=45)
         /// </summary>
-        /// <param name="command"></param>
-        /// <param name="dwProtocol"></param>
-        /// <param name="cbPciLength"></param>
-        /// <param name="maxRecvLength"></param>
+        /// <param name="pageByte">byte/page</param>
+        /// <param name="pageCount"></param>
         /// <param name="cancellationToken"></param>
         /// <returns></returns>
-        public async Task<(byte[] RecvBuffer, int RecvLength)> ReadAsync(byte[] command, int dwProtocol, int cbPciLength, int maxRecvLength, CancellationToken cancellationToken)
+        public async Task<byte[]> ReadBinaryAsync(int pageByte, int pageCount, CancellationToken cancellationToken)
         {
-            return await Task.Run(() =>
+            while (!IsCardPresent)
             {
-                try
+                await Task.Delay(100, cancellationToken);
+            }
+
+            var binary = ReadBinary(pageByte, pageCount);
+            return binary;
+        }
+
+        /// <summary>
+        /// Read URL (NTAG 213 pageByte=4, pageCount=45)
+        /// </summary>
+        /// <param name="pageByte">byte/page</param>
+        /// <param name="pageCount"></param>
+        /// <param name="cancellationToken"></param>
+        /// <returns></returns>
+        public async Task<string> ReadUrlAsync(int pageByte, int pageCount, CancellationToken cancellationToken)
+        {
+            while (!IsCardPresent)
+            {
+                await Task.Delay(100, cancellationToken);
+            }
+
+            var url = ReadUrl(pageByte, pageCount);
+            return url;
+        }
+
+        /// <summary>
+        /// Read TechnologyType
+        /// </summary>
+        /// <param name="cancellationToken"></param>
+        /// <returns></returns>
+        public async Task<TechnologyType> ReadTechnologyTypeAsync(CancellationToken cancellationToken)
+        {
+            while (!IsCardPresent)
+            {
+                await Task.Delay(100, cancellationToken);
+            }
+
+            var technologyType = ReadTechnologyType();
+            return technologyType;
+        }
+
+        private string ReadIDm()
+        {
+            using var reader = _context.ConnectReader(ReaderName, SCardShareMode.Shared, SCardProtocol.Any);
+
+            var apdu = new CommandApdu(IsoCase.Case2Short, reader.Protocol)
+            {
+                CLA = 0xFF,
+                Instruction = InstructionCode.GetData,
+                P1 = 0x00,
+                P2 = 0x00,
+                Le = 0
+            };
+
+            var responseApdu = Transmit(reader, apdu);
+            return responseApdu.HasData ? BitConverter.ToString(responseApdu.GetData()) : string.Empty;
+        }
+
+        private TechnologyType ReadTechnologyType()
+        {
+            using var reader = _context.ConnectReader(ReaderName, SCardShareMode.Shared, SCardProtocol.Any);
+
+            var apdu = new CommandApdu(IsoCase.Case2Short, reader.Protocol)
+            {
+                CLA = 0xFF,
+                Instruction = InstructionCode.GetData,
+                P1 = 0xF3,
+                P2 = 0x00,
+                Le = 0
+            };
+
+            var responseApdu = Transmit(reader, apdu);
+            if (!responseApdu.HasData)
+            {
+                return TechnologyType.None;
+            }
+
+            var data = responseApdu.GetData();
+            var technologyType = (TechnologyType)data[0];
+            return technologyType;
+        }
+
+        private byte[] ReadBinary(int pageByte, int pageCount)
+        {
+            var binary = new List<byte>();
+            var loopCount = pageCount / pageByte + 1;
+            var maxLength = pageByte * pageCount;
+
+            using var reader = _context.ConnectReader(ReaderName, SCardShareMode.Shared, SCardProtocol.Any);
+
+            for (var i = 0; i < loopCount; i++)
+            {
+                var apdu = new CommandApdu(IsoCase.Case2Short, reader.Protocol)
                 {
-                    while (!cancellationToken.IsCancellationRequested)
-                    {
-                        lock (_lock)
-                        {
-                            if (_isCardPresent) break;
-                        }
-                    }
+                    CLA = 0xFF,
+                    Instruction = InstructionCode.ReadBinary,
+                    P1 = 0x00,
+                    P2 = (byte)(i * pageByte),
+                    Le = 0
+                };
 
-                    if (!ConnectCard())
-                        throw new Exception("[NfcReader] Failed : Connecting NfcApi");
-                    if (cancellationToken.IsCancellationRequested)
-                        throw new TaskCanceledException();
-
-                    var ioRequest = new NfcApi.SCARD_IO_REQUEST { dwProtocol = dwProtocol, cbPciLength = cbPciLength };
-                    if (!TransmitReadCommand(command, ioRequest, maxRecvLength, out byte[] recvBuffer, out int recvLength))
-                        throw new Exception("[NfcReader] Failed : Transmitting Read Command");
-                    if (cancellationToken.IsCancellationRequested)
-                        throw new TaskCanceledException();
-
-                    if (!DisconnectCard())
-                        throw new Exception("[NfcReader] Failed : Disconnecting NfcApi");
-                    if (cancellationToken.IsCancellationRequested)
-                        throw new TaskCanceledException();
-
-                    return (recvBuffer, recvLength);
-
-                }
-                catch (Exception e)
+                var responseApdu = Transmit(reader, apdu);
+                if (responseApdu.HasData)
                 {
-                    throw e;
-                }
-            });
-        }
-
-        private bool EstablishContext()
-        {
-            // リソースマネージャに接続しハンドルを取得する
-            var retCode = NfcApi.SCardEstablishContext(NfcApi.SCARD_SCOPE_SYSTEM, 0, 0, ref _hContext);
-
-            if (retCode != NfcApi.SCARD_S_SUCCESS)
-            {
-                _hContext = IntPtr.Zero;
-                return false;
-            }
-
-            return true;
-        }
-
-        private bool SelectReader()
-        {
-            // 使用可能なカードリーダーの数を得る
-            int readerCount = 0;
-            {
-                uint retCode = NfcApi.SCardListReaders(_hContext, null, null, ref readerCount);
-
-                if (retCode != NfcApi.SCARD_S_SUCCESS)
-                {
-                    return false;
-                }
-            }
-
-            // カードリーダーの一覧を得る
-            byte[] readerData = new byte[readerCount * 2];
-            {
-                uint retCode = NfcApi.SCardListReaders(_hContext, null, readerData, ref readerCount);
-
-                if (retCode != NfcApi.SCARD_S_SUCCESS)
-                {
-                    return false;
-                }
-            }
-
-            // カードリーダーの一覧のうち先頭のカードリーダーのみを取り出す
-            string readersDataText = Encoding.Unicode.GetString(readerData);
-            var readerNames = readersDataText.Split('\0').Where(name => !string.IsNullOrEmpty(name)).ToArray();
-            _readerName = readerNames[_deviceIndex];
-
-            // カードリーダーの状態の初期化を行う
-            {
-                _readerStates = new NfcApi.SCARD_READERSTATE[readerNames.Length];
-                _readerStates[_deviceIndex].dwCurrentState = NfcApi.SCARD_STATE_UNAWARE;
-                _readerStates[_deviceIndex].szReader = _readerName;
-                uint retCode = NfcApi.SCardGetStatusChange(_hContext, 100, _readerStates, _readerStates.Length);
-
-                if (retCode != NfcApi.SCARD_S_SUCCESS)
-                {
-                    return false;
-                }
-            }
-
-            return true;
-        }
-
-        private bool GetReaderStatus()
-        {
-            uint retCode = NfcApi.SCardGetStatusChange(_hContext, 100, _readerStates, _readerStates.Length);
-            return retCode == NfcApi.SCARD_S_SUCCESS;
-        }
-
-        public bool ConnectCard()
-        {
-            return ConnectCard(false);
-        }
-
-        private bool ConnectCard(bool isRetry)
-        {
-            uint retCode = NfcApi.SCardConnect(_hContext, _readerName, NfcApi.SCARD_SHARE_SHARED,
-                NfcApi.SCARD_PROTOCOL_T0 | NfcApi.SCARD_PROTOCOL_T1, ref _hCard, ref _activeProtocol);
-
-            // 接続に成功
-            if (retCode == NfcApi.SCARD_S_SUCCESS)
-            {
-                return true;
-            }
-            // カードリーダーなし
-            else if (retCode == NfcApi.SCARD_E_NO_SMARTCARD && !isRetry)
-            {
-                SelectReader();
-                return ConnectCard(true);
-            }
-            else
-            {
-                return false;
-            }
-        }
-
-        public bool DisconnectCard()
-        {
-            uint retCode = NfcApi.SCardDisconnect(_hCard, NfcApi.SCARD_E_CANT_DISPOSE);
-            return retCode == NfcApi.SCARD_S_SUCCESS;
-        }
-
-        private bool ReleaseContext()
-        {
-            uint retCode = NfcApi.SCardReleaseContext(_hContext);
-            return retCode == NfcApi.SCARD_S_SUCCESS;
-        }
-
-        public bool TransmitReadCommand(byte[] sendBuffer, NfcApi.SCARD_IO_REQUEST ioRequest, int maxRecvLength, out byte[] recvBuffer, out int recvLength)
-        {
-            recvBuffer = new byte[maxRecvLength];
-            recvLength = recvBuffer.Length;
-
-            // 読み取り実行
-            {
-                IntPtr SCARD_PCI_T1 = GetPciT1();
-                uint retCode = NfcApi.SCardTransmit(_hCard, SCARD_PCI_T1, sendBuffer, sendBuffer.Length,
-                    ref ioRequest, recvBuffer, ref recvLength);
-
-                if (retCode != NfcApi.SCARD_S_SUCCESS)
-                {
-                    return false;
+                    binary.AddRange(responseApdu.GetData());
                 }
             }
 
-            return true;
+            if (binary.Count > maxLength)
+            {
+                binary.RemoveRange(maxLength, binary.Count - maxLength);
+            }
+
+            return binary.ToArray();
         }
 
-        private IntPtr GetPciT1()
+        private string ReadUrl(int pageByte, int pageCount)
         {
-            IntPtr handle = NfcApi.LoadLibrary("Winscard.dll");
-            IntPtr pci = NfcApi.GetProcAddress(handle, "g_rgSCardT1Pci");
-            NfcApi.FreeLibrary(handle);
-            return pci;
+            var binary = ReadBinary(pageByte, pageCount);
+            var ndefMessage = GetNDEFMessage(binary);
+            var ndefTLV = new NdefTLV(ndefMessage);
+
+            return ndefTLV.record.URI;
         }
+
+        private ResponseApdu Transmit(ICardReader reader, CommandApdu apdu)
+        {
+            using (reader.Transaction(SCardReaderDisposition.Leave))
+            {
+                var sendPci = SCardPCI.GetPci(reader.Protocol);
+                var receivePci = new SCardPCI(); // IO returned protocol control information.
+
+                var receiveBuffer = new byte[256];
+                var command = apdu.ToArray();
+
+                var bytesReceived = reader.Transmit(
+                    sendPci, // Protocol Control Information (T0, T1 or Raw)
+                    command, // command APDU
+                    command.Length,
+                    receivePci, // returning Protocol Control Information
+                    receiveBuffer,
+                    receiveBuffer.Length); // data buffer
+
+                var responseApdu = new ResponseApdu(receiveBuffer, bytesReceived, IsoCase.Case2Short, reader.Protocol);
+                return responseApdu;
+            }
+        }
+
+        private byte[] GetNDEFMessage(byte[] binary)
+        {
+            // 先頭16byteはNFC Forum Type 2 Tagのヘッダ情報
+            var buffer = new byte[binary.Length - 16];
+            Array.Copy(binary, 16, buffer, 0, buffer.Length);
+
+            // NDEF Messageの終端を検索
+            var index = Array.LastIndexOf(buffer, (byte)TLVBlock.Terminator_TLV);
+            if (index < 0)
+            {
+                return null;
+            }
+
+            // NDEF Messageの長さを取得
+            var ndefMessageLength = index + 1;
+
+            // NDEF Messageを取得
+            var ndefMessage = new byte[ndefMessageLength];
+            Array.Copy(buffer, 0, ndefMessage, 0, ndefMessageLength);
+
+            return ndefMessage;
+        }
+
+        private void OnStatusChanged(object sender, StatusChangeEventArgs args)
+        {
+            var isInUse = (args.NewState & SCRState.InUse) == SCRState.InUse;
+            if (isInUse) return;
+
+            switch (args.NewState)
+            {
+                case SCRState.Empty:
+                    if (_currentState == SCRState.Empty) return;
+
+                    IsCardPresent = false;
+                    _onCardRemovedSubject.OnNext(_currentCardIDm);
+                    _currentCardIDm = string.Empty;
+                    break;
+
+                case SCRState.Present:
+                    if (_currentState == SCRState.Present) return;
+
+                    IsCardPresent = true;
+                    _currentCardIDm = ReadIDm();
+                    _onCardDetectedSubject.OnNext(_currentCardIDm);
+                    break;
+            }
+
+            _currentState = args.NewState;
+        }
+    }
+    
+    /// <summary>
+    /// TechnologyType
+    /// </summary>
+    public enum TechnologyType
+    {
+        None = 0x00,
+        TypeA = 0x01, // ISO/IEC 14443A
+        TypeB = 0x02, // ISO/IEC 14443B
+        TypeF = 0x04 // JIS X 6319-4, FeliCa
+
+        /* https://qiita.com/gpsnmeajp/items/d4810b175189609494ac
+            CARD_TYPE_UNKNOWN    0x00
+            CARD_TYPE_ISO14443A  0x01
+            CARD_TYPE_ISO14443B  0x02
+            CARD_TYPE_PICOPASSB  0x03
+            CARD_TYPE_FELICA     0x04
+            CARD_TYPE_NFC_TYPE_1 0x05
+            CARD_TYPE_MIFARE_EC  0x06
+            CARD_TYPE_ISO14443A_4A  0x07
+            CARD_TYPE_ISO14443B_4B  0x08
+            CARD_TYPE_TYPE_A_NFC_DEP  0x09
+            CARD_TYPE_FELICA_NFC_DEP  0x0A
+        */
     }
 }

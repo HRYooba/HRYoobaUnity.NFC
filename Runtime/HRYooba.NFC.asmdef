@@ -1,16 +1,17 @@
 {
     "name": "HRYooba.NFC",
-    "rootNamespace": "",
+    "rootNamespace": "HRYooba.NFC",
     "references": [
-        "GUID:77221876cc6b8244180b96e320b1bcd4",
-        "GUID:f6fc76a59e63e474bb917ebaae61be53"
+        "GUID:5cf98bdb6be0542409f25ea624ab9517"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
     "overrideReferences": true,
     "precompiledReferences": [
-        "R3.dll"
+        "R3.dll",
+        "PCSC.dll",
+        "PCSC.Iso7816.dll"
     ],
     "autoReferenced": true,
     "defineConstraints": [],

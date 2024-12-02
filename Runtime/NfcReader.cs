@@ -15,11 +15,11 @@ namespace HRYooba.NFC
         private readonly int _deviceIndex;
         private ISCardContext _context;
         private ISCardMonitor _monitor;
-        private SCRState _currentState = SCRState.Empty;
-        private string _currentCardIDm = string.Empty;
 
-        private readonly Subject<string> _onCardDetectedSubject = new();
-        private readonly Subject<string> _onCardRemovedSubject = new();
+        private readonly object _lock = new();
+
+        private readonly Subject<Unit> _onCardDetectedSubject = new();
+        private readonly Subject<Unit> _onCardRemovedSubject = new();
 
         /// <summary>
         /// Name of the reader.
@@ -29,17 +29,34 @@ namespace HRYooba.NFC
         /// <summary>
         /// カードがタッチされているかどうか
         /// </summary>
-        public bool IsCardPresent { get; private set; }
+        public bool IsCardPresent
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return _isCardPresent;
+                }
+            }
+            private set
+            {
+                lock (_lock)
+                {
+                    _isCardPresent = value;
+                }
+            }
+        }
+        private bool _isCardPresent;
 
         /// <summary>
         /// カードがタッチされたときのイベント
         /// </summary>
-        public Observable<string> OnCardDetectedObservable => _onCardDetectedSubject;
+        public Observable<Unit> OnCardDetectedObservable => _onCardDetectedSubject;
 
         /// <summary>
         /// カードが離されたときのイベント
         /// </summary>
-        public Observable<string> OnCardRemovedObservable => _onCardRemovedSubject;
+        public Observable<Unit> OnCardRemovedObservable => _onCardRemovedSubject;
 
         /// <summary>
         /// Constructor
@@ -63,7 +80,8 @@ namespace HRYooba.NFC
 
             if (_monitor != null)
             {
-                _monitor.StatusChanged -= OnStatusChanged;
+                _monitor.CardInserted -= OnCardInserted;
+                _monitor.CardRemoved -= OnCardRemoved;
                 _monitor.Cancel();
                 _monitor.Dispose();
             }
@@ -96,7 +114,8 @@ namespace HRYooba.NFC
             // Reader Monitor
             var monitorFactory = MonitorFactory.Instance;
             _monitor = monitorFactory.Create(SCardScope.System);
-            _monitor.StatusChanged += OnStatusChanged;
+            _monitor.CardInserted += OnCardInserted;
+            _monitor.CardRemoved += OnCardRemoved;
             _monitor.Start(ReaderName);
         }
 
@@ -112,7 +131,8 @@ namespace HRYooba.NFC
                 await Task.Delay(100, cancellationToken);
             }
 
-            return _currentCardIDm;
+            var idm = ReadIDm();
+            return idm;
         }
 
         /// <summary>
@@ -134,20 +154,20 @@ namespace HRYooba.NFC
         }
 
         /// <summary>
-        /// Read URL (NTAG 213 pageByte=4, pageCount=45)
+        /// Read URI (ex. NTAG 213 pageByte=4, pageCount=45)
         /// </summary>
         /// <param name="pageByte">byte/page</param>
         /// <param name="pageCount"></param>
         /// <param name="cancellationToken"></param>
         /// <returns></returns>
-        public async Task<string> ReadUrlAsync(int pageByte, int pageCount, CancellationToken cancellationToken)
+        public async Task<string> ReadURIFromType2TagAsync(int pageByte, int pageCount, CancellationToken cancellationToken)
         {
             while (!IsCardPresent)
             {
                 await Task.Delay(100, cancellationToken);
             }
 
-            var url = ReadUrl(pageByte, pageCount);
+            var url = ReadURIFromType2Tag(pageByte, pageCount);
             return url;
         }
 
@@ -242,11 +262,16 @@ namespace HRYooba.NFC
             return binary.ToArray();
         }
 
-        private string ReadUrl(int pageByte, int pageCount)
+        private string ReadURIFromType2Tag(int pageByte, int pageCount)
         {
             var binary = ReadBinary(pageByte, pageCount);
-            var ndefMessage = GetNDEFMessage(binary);
+            var ndefMessage = GetNDEFMessageFromType2Tag(binary);
             var ndefTLV = new NdefTLV(ndefMessage);
+
+            if (ndefTLV == null || ndefTLV.record == null)
+            {
+                return string.Empty;
+            }
 
             return ndefTLV.record.URI;
         }
@@ -274,7 +299,7 @@ namespace HRYooba.NFC
             }
         }
 
-        private byte[] GetNDEFMessage(byte[] binary)
+        private byte[] GetNDEFMessageFromType2Tag(byte[] binary)
         {
             // 先頭16byteはNFC Forum Type 2 Tagのヘッダ情報
             var buffer = new byte[binary.Length - 16];
@@ -297,34 +322,19 @@ namespace HRYooba.NFC
             return ndefMessage;
         }
 
-        private void OnStatusChanged(object sender, StatusChangeEventArgs args)
+        private void OnCardInserted(object sender, CardStatusEventArgs args)
         {
-            var isInUse = (args.NewState & SCRState.InUse) == SCRState.InUse;
-            if (isInUse) return;
+            IsCardPresent = true;
+            _onCardDetectedSubject.OnNext(Unit.Default);
+        }
 
-            switch (args.NewState)
-            {
-                case SCRState.Empty:
-                    if (_currentState == SCRState.Empty) return;
-
-                    IsCardPresent = false;
-                    _onCardRemovedSubject.OnNext(_currentCardIDm);
-                    _currentCardIDm = string.Empty;
-                    break;
-
-                case SCRState.Present:
-                    if (_currentState == SCRState.Present) return;
-
-                    IsCardPresent = true;
-                    _currentCardIDm = ReadIDm();
-                    _onCardDetectedSubject.OnNext(_currentCardIDm);
-                    break;
-            }
-
-            _currentState = args.NewState;
+        private void OnCardRemoved(object sender, CardStatusEventArgs args)
+        {
+            IsCardPresent = false;
+            _onCardRemovedSubject.OnNext(Unit.Default);
         }
     }
-    
+
     /// <summary>
     /// TechnologyType
     /// </summary>

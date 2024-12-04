@@ -73,7 +73,7 @@ var url = await _nfcReader.ReadURIFromType2TagAsync(pageByte, pageCount, ct);
 - pageCount: 読み取るページ数
 
 NFC Toolなどで確認してください  
-<img src="Docs/nfc_tool.png" width="50%">
+<img src="https://github.com/user-attachments/assets/62725638-71d7-4598-adb6-593d654aefe0" width="50%">
 
 ### 3.4.ReadTechnologyTypeAsync
 カードのテクノロジータイプを読み取ります

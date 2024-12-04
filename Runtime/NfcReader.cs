@@ -126,13 +126,16 @@ namespace HRYooba.NFC
         /// <returns></returns>
         public async Task<string> ReadIDmAsync(CancellationToken cancellationToken)
         {
-            while (!IsCardPresent)
+            return await Task.Run(async () =>
             {
-                await Task.Delay(100, cancellationToken);
-            }
+                while (!IsCardPresent)
+                {
+                    await Task.Delay(100, cancellationToken);
+                }
 
-            var idm = ReadIDm();
-            return idm;
+                var idm = ReadIDm();
+                return idm;
+            });
         }
 
         /// <summary>
@@ -144,13 +147,16 @@ namespace HRYooba.NFC
         /// <returns></returns>
         public async Task<byte[]> ReadBinaryAsync(int pageByte, int pageCount, CancellationToken cancellationToken)
         {
-            while (!IsCardPresent)
+            return await Task.Run(async () =>
             {
-                await Task.Delay(100, cancellationToken);
-            }
+                while (!IsCardPresent)
+                {
+                    await Task.Delay(100, cancellationToken);
+                }
 
-            var binary = ReadBinary(pageByte, pageCount);
-            return binary;
+                var binary = ReadBinary(pageByte, pageCount);
+                return binary;
+            });
         }
 
         /// <summary>
@@ -162,13 +168,16 @@ namespace HRYooba.NFC
         /// <returns></returns>
         public async Task<string> ReadURIFromType2TagAsync(int pageByte, int pageCount, CancellationToken cancellationToken)
         {
-            while (!IsCardPresent)
+            return await Task.Run(async () =>
             {
-                await Task.Delay(100, cancellationToken);
-            }
+                while (!IsCardPresent)
+                {
+                    await Task.Delay(100, cancellationToken);
+                }
 
-            var url = ReadURIFromType2Tag(pageByte, pageCount);
-            return url;
+                var url = ReadURIFromType2Tag(pageByte, pageCount);
+                return url;
+            });
         }
 
         /// <summary>
@@ -178,13 +187,16 @@ namespace HRYooba.NFC
         /// <returns></returns>
         public async Task<TechnologyType> ReadTechnologyTypeAsync(CancellationToken cancellationToken)
         {
-            while (!IsCardPresent)
+            return await Task.Run(async () =>
             {
-                await Task.Delay(100, cancellationToken);
-            }
+                while (!IsCardPresent)
+                {
+                    await Task.Delay(100, cancellationToken);
+                }
 
-            var technologyType = ReadTechnologyType();
-            return technologyType;
+                var technologyType = ReadTechnologyType();
+                return technologyType;
+            });
         }
 
         private string ReadIDm()

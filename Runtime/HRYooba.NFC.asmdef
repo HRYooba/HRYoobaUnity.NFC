@@ -2,7 +2,8 @@
     "name": "HRYooba.NFC",
     "rootNamespace": "HRYooba.NFC",
     "references": [
-        "GUID:5cf98bdb6be0542409f25ea624ab9517"
+        "GUID:5cf98bdb6be0542409f25ea624ab9517",
+        "GUID:77221876cc6b8244180b96e320b1bcd4"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

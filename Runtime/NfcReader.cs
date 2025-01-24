@@ -51,12 +51,12 @@ namespace HRYooba.NFC
         /// <summary>
         /// カードがタッチされたときのイベント
         /// </summary>
-        public Observable<Unit> OnCardDetectedObservable => _onCardDetectedSubject;
+        public Observable<Unit> OnCardDetectedObservable => _onCardDetectedSubject.ObserveOnMainThread();
 
         /// <summary>
         /// カードが離されたときのイベント
         /// </summary>
-        public Observable<Unit> OnCardRemovedObservable => _onCardRemovedSubject;
+        public Observable<Unit> OnCardRemovedObservable => _onCardRemovedSubject.ObserveOnMainThread();
 
         /// <summary>
         /// Constructor

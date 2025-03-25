@@ -13,6 +13,7 @@ namespace HRYooba.NFC
     public class NfcReader : IDisposable
     {
         private readonly int _deviceIndex;
+        private readonly int _readIntervalMs;
         private ISCardContext _context;
         private ISCardMonitor _monitor;
 
@@ -62,9 +63,10 @@ namespace HRYooba.NFC
         /// Constructor
         /// </summary>
         /// <param name="deviceIndex"></param>
-        public NfcReader(int deviceIndex = 0)
+        public NfcReader(int deviceIndex = 0, int readIntervalMs = 100)
         {
             _deviceIndex = deviceIndex;
+            _readIntervalMs = readIntervalMs;
         }
 
         /// <summary>
@@ -130,7 +132,11 @@ namespace HRYooba.NFC
             {
                 while (!IsCardPresent)
                 {
-                    await Task.Delay(100, cancellationToken);
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        return string.Empty;
+                    }
+                    await Task.Delay(_readIntervalMs, cancellationToken);
                 }
 
                 var idm = ReadIDm();
@@ -151,7 +157,11 @@ namespace HRYooba.NFC
             {
                 while (!IsCardPresent)
                 {
-                    await Task.Delay(100, cancellationToken);
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        return Array.Empty<byte>();
+                    }
+                    await Task.Delay(_readIntervalMs, cancellationToken);
                 }
 
                 var binary = ReadBinary(pageByte, pageCount);
@@ -172,7 +182,11 @@ namespace HRYooba.NFC
             {
                 while (!IsCardPresent)
                 {
-                    await Task.Delay(100, cancellationToken);
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        return string.Empty;
+                    }
+                    await Task.Delay(_readIntervalMs, cancellationToken);
                 }
 
                 var url = ReadURIFromType2Tag(pageByte, pageCount);
@@ -191,7 +205,11 @@ namespace HRYooba.NFC
             {
                 while (!IsCardPresent)
                 {
-                    await Task.Delay(100, cancellationToken);
+                    if (cancellationToken.IsCancellationRequested)
+                    {
+                        return TechnologyType.None;
+                    }
+                    await Task.Delay(_readIntervalMs, cancellationToken);
                 }
 
                 var technologyType = ReadTechnologyType();
